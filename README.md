@@ -1,6 +1,5 @@
 # 🏦 RAG Assistant — финансовый ассистент на основе базы знаний
 
-> Четвёртый проект из серии [AI/Prompt Engineering Portfolio](https://github.com/yourusername)  
 > Прицельно разработан под задачи AI/Prompt-инженера в Data-командах финтех-компаний
 
 ---
