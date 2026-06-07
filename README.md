@@ -1,17 +1,14 @@
 # 🏦 RAG Assistant — финансовый ассистент на основе базы знаний
 
-> Четвёртый проект из серии [AI/Prompt Engineering Portfolio](https://github.com/yourusername)  
-> Прицельно разработан под задачи AI/Prompt-инженера в Data-командах финтех-компаний
+> Проект из серии [AI/Prompt Engineering Portfolio](https://github.com/AdamParadiseGr)
 
 ---
 
 ## Задача
 
-Бизнес-задача: дать клиентам и операторам банка инструмент, который отвечает на вопросы по финансовым продуктам, тарифам и регуляторным документам — **точно, с источником, без галлюцинаций**.
+Бизнес-задача: дать клиентам и операторам банка инструмент, который отвечает на вопросы по финансовым продуктам, тарифам и регуляторным документам — точно, с источником, без галлюцинаций.
 
-Технический вызов: обычный LLM не знает внутренних документов, а файн-тюнинг дорог и не масштабируется при частом обновлении базы знаний. RAG (Retrieval-Augmented Generation) решает оба ограничения.
-
-**Целевой сценарий:** оператор поддержки или клиент задаёт вопрос → система находит релевантные фрагменты из документации → LLM формирует ответ строго на основе найденных источников → пользователь видит ответ + ссылки на документы.
+Технический вызов: обычный LLM не знает внутренних документов, а файн-тюнинг дорог и не масштабируется при частом обновлении базы знаний. RAG решает оба ограничения.
 
 ---
 
@@ -31,13 +28,13 @@
 │  ┌──────────┐    ┌──────────────┐    ┌────────────▼───────┐    │
 │  │  Answer  │◀───│  Generation  │◀───│    Retrieval       │    │
 │  │ +Sources │    │  - Prompting │    │    - Dense search  │    │
-│  └──────────┘    │  - CoT       │    │    - Reranking     │    │
-│                  │  - Grounding │    │    - MMR           │    │
+│  └──────────┘    │  - CoT       │    │    - MMR Reranking │    │
+│                  │  - Grounding │    │    - Query Decomp. │    │
 │                  └──────────────┘    └────────────────────┘    │
 │                                                                 │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │  Evaluation Layer (RAGAS: faithfulness, relevancy,      │   │
-│  │  context precision, answer correctness)                 │   │
+│  │  Evaluation Layer (LLM-as-judge: faithfulness,          │   │
+│  │  answer relevancy, context precision)                   │   │
 │  └─────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -46,12 +43,13 @@
 
 | Слой | Технология | Обоснование выбора |
 |------|------------|-------------------|
-| Chunking | RecursiveCharacterTextSplitter (512/64) | Лучше сохраняет семантические границы, чем фиксированный размер |
-| Embeddings | `text-embedding-3-small` | Баланс цены и качества для русского языка |
-| Vector Store | ChromaDB (local) | Простой деплой, персистентное хранилище, нет зависимостей от облака |
+| Chunking | RecursiveCharacterTextSplitter (512/64) | Сохраняет семантические границы лучше фиксированного размера |
+| Embeddings | sentence-transformers (локально) | Бесплатно, поддерживает русский язык, без внешних API |
+| Vector Store | ChromaDB | Простой деплой, персистентное хранилище |
 | Retrieval | Top-K + MMR Reranking | MMR устраняет дублирование релевантных чанков |
-| LLM | GPT-4o-mini (OpenAI) | Хорошее следование инструкциям, structured output |
-| Evaluation | RAGAS | Автоматические метрики без ручной разметки |
+| Query Expansion | Query Decomposition | Составные вопросы разбиваются на под-запросы |
+| LLM | Groq / llama-3.1-8b-instant | Бесплатный tier, ротация ключей при rate limit |
+| Evaluation | LLM-as-judge (собственный) | Прозрачная реализация метрик без внешних зависимостей |
 
 ---
 
@@ -59,136 +57,93 @@
 
 ```
 Python 3.11+
-├── langchain / langchain-community    # оркестрация RAG-пайплайна
-├── langchain-openai                   # OpenAI embeddings + LLM
+├── langchain / langchain-chroma       # оркестрация RAG-пайплайна
+├── langchain-groq                     # Groq LLM
+├── langchain-huggingface              # sentence-transformers embeddings
 ├── chromadb                           # векторное хранилище
-├── ragas                              # оценка качества RAG
-├── pypdf                              # парсинг PDF
-├── pydantic v2                        # structured output, валидация
+├── pydantic v2                        # валидация structured output
 ├── typer                              # CLI-интерфейс
-└── pytest                             # тесты промптов и пайплайна
+└── pytest                             # тесты (14 штук, все проходят)
 ```
+
+Поддерживаемые LLM провайдеры (переключаются через `.env`): Groq, OpenAI, Anthropic.
 
 ---
 
 ## Как работал Prompt Engineering
 
-Промпты версионируются в папке `prompts/` — каждая версия это отдельный файл с метаданными (дата, мотивация изменения, метрики до/после).
+Промпты версионируются в `prompts/` — каждый файл содержит дату, мотивацию изменения и выявленные проблемы.
 
-### Версия 1 — Baseline (простой RAG)
+### v1 — Baseline
 
-```
-prompts/v1/system.txt
-```
+Наивный промпт: передаём контекст и просим ответить.
 
-Наивный промпт: просто передаём контекст и просим ответить. **Проблемы:**
-- LLM "дополняла" ответ знаниями из pre-training (галлюцинации)
-- Не было чёткого формата источников
-- Faithfulness: **0.61**
+**Проблемы:** LLM добавляла факты из pre-training, не указывала источники, непредсказуемый формат.
 
-### Версия 2 — Grounding + Negative Constraint
+### v2 — Grounding + Negative Constraint
 
-```
-prompts/v2/system.txt
-```
+Добавлено: явный запрет отвечать вне контекста, требование цитировать источник.
 
-Добавлено явное ограничение: *"Если ответ не содержится в предоставленных фрагментах — ответь 'Не могу ответить на основе имеющейся документации'"*. Добавлено требование цитировать источник.
+**Остаточные проблемы:** без CoT модель иногда путала источники при нескольких чанках.
 
-Прирост Faithfulness: 0.61 → **0.79**
+### v3 — Chain-of-Thought + JSON Output (production)
 
-### Версия 3 — Chain-of-Thought + Structured Output
+1. **CoT reasoning** — модель явно анализирует чанки перед ответом: какой релевантен, есть ли противоречия, достаточно ли контекста
+2. **JSON output** — структурированный ответ: `answer`, `sources`, `confidence`, `needs_clarification`
+3. **Few-shot examples** — примеры для edge-cases: вопрос вне базы, неоднозначный вопрос, противоречие источников
 
-```
-prompts/v3/system.txt
-```
+---
 
-Ключевые изменения:
-1. **CoT reasoning**: LLM сначала выписывает, какие именно фрагменты отвечают на вопрос, затем формирует ответ
-2. **Structured output** (Pydantic): `answer`, `sources`, `confidence`, `needs_clarification`
-3. **Few-shot examples**: 3 примера правильного поведения при неоднозначных вопросах
+## Результаты оценки (LLM-as-judge)
 
-Прирост метрик:
-- Faithfulness: 0.79 → **0.91**
-- Answer Relevancy: 0.74 → **0.88**
-- Context Precision: 0.68 → **0.83**
+Оценка по методологии RAGAS реализована через собственный LLM-as-judge на базе Groq.  
+Тестовый датасет: 18 вопросов по `data/sample_docs/tariffs_2024.txt`.  
+Полные отчёты: [`results/eval_v1.json`](results/eval_v1.json), [`results/eval_v2.json`](results/eval_v2.json), [`results/eval_v3.json`](results/eval_v3.json)
 
-### Финальный промпт (v3)
+| Метрика | v1 (baseline) | v2 (+grounding) | v3 (+CoT +JSON) |
+|---------|:---:|:---:|:---:|
+| Faithfulness | 0.972 | 0.972 | 0.972 |
+| Answer Relevancy | 0.861 | 0.878 | 0.878 |
+| Context Precision | 0.611 | 0.611 | 0.611 |
 
-```
-Ты — ассистент поддержки финансовых продуктов. Твоя задача — точно 
-отвечать на вопросы, опираясь исключительно на предоставленные 
-фрагменты документации.
+**Наблюдение:** на простых вопросах с явным ответом в контексте все три версии показывают высокую faithfulness. Разница между промптами проявляется на edge-cases: вопросы вне базы знаний, неоднозначные формулировки, противоречия между источниками — именно для них добавлялись negative constraint и few-shot примеры в v2/v3.
 
-ПРАВИЛА:
-1. Используй ТОЛЬКО информацию из <context>. Не добавляй знания 
-   из pre-training.
-2. Если ответ есть в контексте — дай его чётко, процитируй источник.
-3. Если ответа нет — скажи: "Эта информация отсутствует в 
-   предоставленной документации."
-4. Если вопрос неоднозначен — уточни перед ответом.
-
-ПРОЦЕСС РАССУЖДЕНИЯ (выполни внутренне перед ответом):
-- Какой из фрагментов наиболее релевантен вопросу?
-- Есть ли противоречия между фрагментами?
-- Достаточно ли контекста для уверенного ответа?
-```
+Context Precision (0.611) отражает retrieval, а не качество промпта — на базе из одного документа retriever иногда возвращает менее релевантные чанки.
 
 ---
 
 ## Какие проблемы решал
 
-### Проблема 1: Галлюцинации при отсутствии релевантного контекста
-**Симптом:** LLM выдавала правдоподобный, но выдуманный ответ, когда нужная информация не была в retrieved chunks.  
-**Решение:** Добавил в промпт явный negative constraint + метрику `faithfulness` в evaluation loop. Теперь если faithfulness < 0.7 на тестовой выборке — промпт идёт на доработку.
+**Проблема 1: Галлюцинации**  
+Симптом: LLM выдавала правдоподобный, но выдуманный ответ.  
+Решение: negative constraint в промпте + faithfulness как quality gate в evaluation loop.
 
-### Проблема 2: Плохое извлечение при длинных вопросах
-**Симптом:** Вопрос "Какие документы нужны для открытия расчётного счёта ИП и сколько времени занимает проверка?" → retrieval находил только часть ответа.  
-**Решение:** Query decomposition — длинный вопрос разбивается на под-вопросы, retrieval выполняется для каждого, результаты объединяются перед генерацией.
+**Проблема 2: Неполные ответы на составные вопросы**  
+Симптом: "Какие документы нужны для ИП и сколько стоит счёт?" → retrieval находил только часть.  
+Решение: query decomposition — вопрос разбивается на под-запросы, retrieval выполняется для каждого (`src/retrieval/retriever.py` → `decompose_query()`).
 
-### Проблема 3: Дублирование чанков
-**Симптом:** Top-5 retrieved chunks содержали почти идентичные фрагменты из разных частей документа.  
-**Решение:** Заменил простой cosine similarity на MMR (Maximum Marginal Relevance) — баланс между релевантностью и разнообразием.
-
-### Проблема 4: Потеря контекста при больших документах
-**Симптом:** Ответы на вопросы, требующие информации с разных страниц документа, были неполными.  
-**Решение:** Parent-child chunking: маленькие чанки для точного поиска, большие "родительские" чанки передаются в LLM для генерации.
-
----
-
-## Результаты
-
-### Метрики качества (тестовая выборка: 50 вопросов)
-
-| Метрика | Baseline (v1) | Финал (v3) | Δ |
-|---------|--------------|-----------|---|
-| Faithfulness | 0.61 | **0.91** | +49% |
-| Answer Relevancy | 0.70 | **0.88** | +26% |
-| Context Precision | 0.65 | **0.83** | +28% |
-| Context Recall | 0.58 | **0.79** | +36% |
-
-### Функциональные результаты
-- Система корректно отказывается отвечать на вопросы вне базы знаний в **94%** случаев (vs 23% в baseline)
-- Время ответа: ~1.8 сек (retrieval ~200ms + generation ~1.6s)
-- Поддерживает базы знаний до 10,000 документов без деградации качества поиска
+**Проблема 3: Дублирование чанков**  
+Симптом: top-5 retrieved chunks содержали почти идентичные фрагменты.  
+Решение: MMR (Maximum Marginal Relevance) вместо простого cosine similarity top-K.
 
 ---
 
 ## Быстрый старт
 
 ```bash
-git clone https://github.com/yourusername/rag-assistant
-cd rag-assistant
+git clone https://github.com/AdamParadiseGr/RAG-Assistant
+cd RAG-Assistant
 pip install -r requirements.txt
-cp .env.example .env  # добавь OPENAI_API_KEY
+cp .env.example .env  # вставь GROQ_API_KEY_1=...
 
-# Загрузить документы в базу знаний
-python scripts/ingest.py --docs-dir data/sample_docs/
+# Загрузить документы
+PYTHONUTF8=1 python scripts/main.py ingest --docs-dir data/sample_docs/
 
-# Запустить ассистента
-python scripts/chat.py
+# Запустить чат
+PYTHONUTF8=1 python scripts/main.py chat
 
 # Запустить evaluation
-python scripts/evaluate.py --output results/eval_report.json
+PYTHONUTF8=1 python scripts/evaluate_all.py
 ```
 
 ---
@@ -196,18 +151,22 @@ python scripts/evaluate.py --output results/eval_report.json
 ## Структура репозитория
 
 ```
-rag-assistant/
+RAG-Assistant/
 ├── src/
-│   ├── ingestion/          # загрузка, парсинг, chunking, embedding
-│   ├── retrieval/          # vector search, reranking, query decomposition
-│   ├── generation/         # промпт-менеджер, LLM-вызовы, structured output
-│   └── evaluation/         # RAGAS-метрики, тестовые наборы
+│   ├── llm_factory.py      # единая точка конфигурации LLM и Embeddings
+│   ├── ingestion/          # загрузка, chunking, embedding
+│   ├── retrieval/          # MMR поиск, query decomposition
+│   ├── generation/         # промпт-менеджер, JSON output
+│   └── evaluation/         # LLM-as-judge evaluator
 ├── prompts/
-│   ├── v1/                 # baseline промпты
-│   ├── v2/                 # + grounding constraints
-│   └── v3/                 # + CoT + structured output (production)
-├── data/sample_docs/       # примеры документов для демо
-├── tests/                  # unit-тесты промптов и компонентов
-├── scripts/                # ingest.py, chat.py, evaluate.py
-└── notebooks/              # эксперименты и анализ метрик
+│   ├── v1/system.txt       # baseline
+│   ├── v2/system.txt       # + grounding constraints
+│   └── v3/system.txt       # + CoT + JSON output (production)
+├── tests_data/
+│   └── eval_dataset.json   # 18 вопросов с эталонными ответами
+├── results/                # JSON-отчёты оценки по каждой версии промпта
+├── tests/                  # unit-тесты (14 штук)
+└── scripts/
+    ├── main.py             # CLI: ingest / chat
+    └── evaluate_all.py     # запуск полной оценки
 ```
